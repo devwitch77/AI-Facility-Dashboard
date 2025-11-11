@@ -1,0 +1,25 @@
+{
+  "trainedAt": "2025-11-10T14:23:26.731Z",
+  "sensors": {
+    "Temperature Sensor 1": {
+      "mean": 24.9777,
+      "stdev": 2.9512,
+      "n": 3339
+    },
+    "Humidity Sensor 1": {
+      "mean": 50.4075,
+      "stdev": 11.462,
+      "n": 3339
+    },
+    "CO2 Sensor 1": {
+      "mean": 601.5556,
+      "stdev": 112.8829,
+      "n": 3339
+    },
+    "Light Sensor 1": {
+      "mean": 404.2579,
+      "stdev": 171.879,
+      "n": 3339
+    }
+  }
+}
