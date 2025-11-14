@@ -1,13 +1,8 @@
 {
-  "dependencies": {
-    "chart.js": "^4.5.1",
-    "node-fetch": "^3.3.2",
-    "pg": "^8.16.3",
-    "react-chartjs-2": "^5.3.0"
-  },
-  "devDependencies": {
-    "autoprefixer": "^10.4.22",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^4.1.17"
+  "name": "ai-facility-root",
+  "private": true,
+  "scripts": {
+    "build": "cd dashboard && npm run build",
+    "start": "cd dashboard && npm run start"
   }
 }
