@@ -21,6 +21,7 @@ import { useFacility } from "./FacilityContext";
 import CitySwitcher from "./components/CitySwitcher";
 import AiPanel from "./components/AIPanel";
 import IntelligenceAnnouncer from "./components/IntelligenceAnnouncer";
+// 🚫 Removed: GenerateInsights import to avoid duplicate insights
 import GenerateInsights from "./components/GenerateInsights";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
@@ -117,6 +118,36 @@ const SENSOR_POS_LOCAL = {
   "Light Sensor 1": { room: "Lobby", top: 0.3, left: 0.6 },
 };
 
+const FRESH_WINDOW_MS = 5 * 60 * 1000;
+
+const inRange = (thr, v) => typeof v === "number" && thr && v >= thr.min && v <= thr.max;
+const outOfRange = (thr, v) => typeof v === "number" && thr && (v < thr.min || v > thr.max);
+
+function computeBreachesNow({ facility, history, thresholds }) {
+  const now = Date.now();
+  const breaches = [];
+  Object.keys(history)
+    .filter((k) => k.startsWith(`${facility} •`))
+    .forEach((full) => {
+      const series = history[full];
+      if (!series?.length) return;
+      const pt = series[series.length - 1];
+      if (!pt?.x || typeof pt?.y !== "number") return;
+      if (now - new Date(pt.x).getTime() > FRESH_WINDOW_MS) return;
+
+      const thr = thresholds[full];
+      if (outOfRange(thr, pt.y)) {
+        breaches.push({
+          sensor: full,
+          value: pt.y,
+          status: pt.y < thr.min ? "low" : "high",
+          time: pt.x,
+        });
+      }
+    });
+  return breaches.sort((a, b) => new Date(b.time) - new Date(a.time));
+}
+
 const getColorForValue = (value, thr) => {
   if (value === undefined || value === null || !thr) return forest.ink;
   const { min, max } = thr;
@@ -208,8 +239,25 @@ export default function Dashboard() {
     return out;
   }, [withFacility]);
 
-  const [history, setHistory] = useState({});
+  // NEW: hard filter for ridiculous spikes (e.g., humidity 10 or 700)
+  const sanitizeValue = useCallback(
+    (sensorFull, raw) => {
+      const thr = ALERT_THRESHOLDS[sensorFull];
+      const v = Number(raw);
+      if (!thr || typeof v !== "number" || Number.isNaN(v)) return v;
+      const range = thr.max - thr.min;
+      const hardMin = thr.min - 2 * range;
+      const hardMax = thr.max + 2 * range;
+      if (v < hardMin || v > hardMax) {
+        // treat as sensor glitch → ignore this point
+        return null;
+      }
+      return v;
+    },
+    [ALERT_THRESHOLDS]
+  );
 
+  const [history, setHistory] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [allAlerts, setAllAlerts] = useState([]);
   const [filter, setFilter] = useState("");
@@ -221,6 +269,54 @@ export default function Dashboard() {
   const [ack, setAck] = useState(() => new Set());
   const ackSnapRef = useRef(new Set());
   const [ackSeq, setAckSeq] = useState(0);
+
+// TTS is now MUCH calmer + needs sustained anomalies
+const ttsPolicy = {
+  // at least 2 minutes between alerts for the same sensor + direction
+  cooldownMs: 120000,
+  // tiny noise we ignore
+  epsilon: 0.5,
+  // how big a change must be (on top of cooldown) to speak again
+  minDeltaByType: {
+    temperature: 1.5, // °C
+    humidity: 6,      // %
+    co2: 150,         // ppm
+    light: 120,       // lux
+  },
+  // must be out of range for at least this long before TTS fires
+  minBreachMs: 30000, // 30 seconds
+};
+
+  const lastSpokenRef = useRef(new Map());
+  const sensorType = (name) => {
+    const n = name.toLowerCase();
+    if (n.includes("temp")) return "temperature";
+    if (n.includes("humid")) return "humidity";
+    if (n.includes("co2")) return "co2";
+    if (n.includes("light")) return "light";
+    return "other";
+  };
+
+  // NEW: throttle alerts per sensor+status (not per value)
+  const recentAlertsRef = useRef([]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const cutoff = Date.now() - 10000;
+      recentAlertsRef.current = recentAlertsRef.current.filter((r) => r.t > cutoff);
+    }, 3000);
+    return () => clearInterval(id);
+  }, []);
+
+  const seenRecently = (sensor, status) => {
+    const key = `${sensor}|${status}`;
+    const now = Date.now();
+    const cutoff = now - 10000; // 10 seconds window
+    recentAlertsRef.current = recentAlertsRef.current.filter((r) => r.t > cutoff);
+    const hit = recentAlertsRef.current.find((r) => r.key === key);
+    if (hit) return true;
+    recentAlertsRef.current.push({ key, t: now });
+    return false;
+  };
 
   useEffect(() => {
     setTtsPaused(paused);
@@ -240,6 +336,7 @@ export default function Dashboard() {
     setTimeout(() => setToasts((p) => p.filter((x) => x.id !== id)), 3000);
   };
 
+  // CHANGED: include ALERT_THRESHOLDS + sanitizeValue in deps & logic
   useEffect(() => {
     socket.on("connect", () => {});
     socket.on("all-sensors", (data) => {
@@ -254,15 +351,20 @@ export default function Dashboard() {
             ];
       initSensors(list);
     });
+
     socket.on("sensor-updated", (s) => {
       if (paused) return;
       const namespaced = { ...s, name: withFacility(baseNameFromFull(s.name)) };
       setHistory((prev) => {
-        const h = prev[namespaced.name] || [];
-        const next = clamp([...h, { x: new Date(namespaced.updated_at), y: Number(namespaced.value) }]);
-        return { ...prev, [namespaced.name]: next };
+        const k = namespaced.name;
+        const value = sanitizeValue(k, namespaced.value);
+        if (value == null) return prev; // ignore glitch
+        const h = prev[k] || [];
+        const next = clamp([...h, { x: new Date(namespaced.updated_at), y: Number(value) }]);
+        return { ...prev, [k]: next };
       });
     });
+
     socket.on("all-alerts", (arr) => {
       if (Array.isArray(arr) && arr.length) {
         const formatted = arr.map((a) => {
@@ -277,13 +379,19 @@ export default function Dashboard() {
         setAllAlerts((p) => [...formatted, ...p]);
       }
     });
+
     socket.on("sensor-alert", (a) => {
       const ns = { ...a, sensor: withFacility(baseNameFromFull(a.sensor)) };
-      const item = { ...ns, value: Number(ns.value), time: new Date() };
+      const value = sanitizeValue(ns.sensor, ns.value);
+      if (value == null) return; // ignore glitch alerts
+      const item = { ...ns, value: Number(value), time: new Date() };
+      if (seenRecently(item.sensor, item.status)) return; // throttle alerts to every 10s
+
       setAlerts((p) => [item, ...p]);
       setAllAlerts((p) => [item, ...p]);
       if (!ack.has(ns.sensor)) speakAlert(item);
     });
+
     return () => {
       socket.off("connect");
       socket.off("all-sensors");
@@ -291,7 +399,7 @@ export default function Dashboard() {
       socket.off("all-alerts");
       socket.off("sensor-alert");
     };
-  }, [paused, withFacility, ack]);
+  }, [paused, withFacility, ack, sanitizeValue]);
 
   const initSensors = (list) => {
     setHistory((prev) => {
@@ -307,6 +415,7 @@ export default function Dashboard() {
     });
   };
 
+  // CHANGED: alerts derived from history also throttled via seenRecently
   useEffect(() => {
     Object.entries(history).forEach(([name, series]) => {
       if (!name.startsWith(`${facility} •`)) return;
@@ -315,38 +424,125 @@ export default function Dashboard() {
       const last = series[series.length - 1].y;
       if (last < thr.min || last > thr.max) {
         const status = last < thr.min ? "low" : "high";
-        const exists = allAlerts.find((a) => a.sensor === name && a.value === last);
-        if (!exists) {
-          const item = { sensor: name, value: last, status, time: new Date() };
-          setAlerts((p) => [item, ...p]);
-          setAllAlerts((p) => [item, ...p]);
-          if (!ack.has(name)) speakAlert(item);
-        }
+        if (seenRecently(name, status)) return;
+        const item = { sensor: name, value: last, status, time: new Date() };
+        setAlerts((p) => [item, ...p]);
+        setAllAlerts((p) => [item, ...p]);
+        if (!ack.has(name)) speakAlert(item);
       }
     });
-  }, [history, facility, ALERT_THRESHOLDS, allAlerts, ack]);
+  }, [history, facility, ALERT_THRESHOLDS, ack]);
+
+const getBreachDurationInfo = useCallback(
+  (sensorName) => {
+    const thr = ALERT_THRESHOLDS[sensorName];
+    const series = history[sensorName] || [];
+    if (!thr || !series.length) return null;
+
+    const now = Date.now();
+    let startIdx = series.length - 1;
+
+    // walk backwards until we leave the breach zone
+    for (let i = series.length - 1; i >= 0; i--) {
+      const p = series[i];
+      if (!p?.x || typeof p?.y !== "number") continue;
+      if (!outOfRange(thr, p.y)) break;
+      startIdx = i;
+    }
+
+    const startPoint = series[startIdx];
+    if (!startPoint?.x) return null;
+
+    const startTs = new Date(startPoint.x).getTime();
+    const durationMs = now - startTs;
+    const mins = Math.max(1, Math.round(durationMs / 60000));
+
+    return { durationMs, mins, startTs };
+  },
+  [history, ALERT_THRESHOLDS]
+);
+
 
   const speakAlert = useCallback(
-    (item) => {
-      if (paused) return;
+  (item) => {
+    if (paused) return;
+    try {
       const baseName = baseNameFromFull(item.sensor);
-      const room = SENSOR_POS[item.sensor]?.room || SENSOR_POS[withFacility(baseName)]?.room || "facility";
+      const room =
+        SENSOR_POS[item.sensor]?.room ||
+        SENSOR_POS[withFacility(baseName)]?.room ||
+        "facility";
       const facilityName = facility;
+      const type = sensorType(baseName);
+
+      // 1) How long has this been bad?
+      const duration = getBreachDurationInfo(item.sensor);
+      if (!duration) return;
+
+      // don’t speak if it’s a super fresh blip (< minBreachMs)
+      if (duration.durationMs < ttsPolicy.minBreachMs) return;
+
+      const key = `${facilityName}|${baseName}|${item.status || "warn"}`;
+      const last = lastSpokenRef.current.get(key);
+      const now = Date.now();
+      const minDelta = ttsPolicy.minDeltaByType[type] ?? 2;
+
+      if (last) {
+        const withinCooldown = now - last.t < ttsPolicy.cooldownMs;
+        const deltaSmall =
+          Math.abs(Number(item.value) - Number(last.value)) <
+          Math.max(minDelta, ttsPolicy.epsilon);
+
+        if (withinCooldown || deltaSmall) {
+          // already complained recently about this – stay quiet
+          return;
+        }
+      }
+
+      lastSpokenRef.current.set(key, { t: now, value: Number(item.value) });
+
+      const thr = ALERT_THRESHOLDS[item.sensor];
+      const durationPart =
+        duration?.mins != null
+          ? ` running ${item.status === "high" ? "high" : "low"} for about ${
+              duration.mins
+            } minute${duration.mins === 1 ? "" : "s"}`
+          : "";
+
+      const rangePart =
+        thr && typeof thr.min === "number" && typeof thr.max === "number"
+          ? ` (normal ${thr.min}–${thr.max}).`
+          : ".";
+
       const msg =
         `${baseName.replace(" Sensor 1", "")} in ${room} at ${facilityName} is ` +
-        `${item.status === "high" ? "high" : "low"}. Value ${Math.round(item.value)}.`;
+        `${item.status === "high" ? "high" : item.status === "low" ? "low" : "out of range"}${durationPart}. ` +
+        `Current value ${Math.round(item.value)}${rangePart}`;
+
       speak(msg, { rate: 1.02, pitch: 1.0, volume: 1.0 });
-    },
-    [withFacility, facility, SENSOR_POS, paused]
-  );
+    } catch {
+      // swallow TTS errors
+    }
+  },
+  [
+    paused,
+    facility,
+    SENSOR_POS,
+    withFacility,
+    ALERT_THRESHOLDS,
+    getBreachDurationInfo,
+  ]
+);
+
 
   const facilityHistoryKeys = useMemo(
     () => Object.keys(history).filter((k) => k.startsWith(`${facility} •`)),
     [history, facility]
   );
 
-  const filteredSensors = facilityHistoryKeys.filter((n) =>
-    baseNameFromFull(n).toLowerCase().includes(filter.toLowerCase())
+  const filteredSensors = useMemo(
+    () => facilityHistoryKeys.filter((n) => baseNameFromFull(n).toLowerCase().includes(filter.toLowerCase())),
+    [facilityHistoryKeys, filter]
   );
 
   const getTimeUnit = (len) => (len <= 20 ? "second" : len <= 180 ? "minute" : "hour");
@@ -462,34 +658,81 @@ export default function Dashboard() {
     [history, facilityAverages, findNearestSensorByType, facility, SENSOR_POS]
   );
 
+  // CHANGED: analytics now also returns mode + statusLine for techy sidebar
   const analytics = useMemo(() => {
-    let sumDev = 0,
-      count = 0;
-    facilityHistoryKeys.forEach((name) => {
+    const names = facilityHistoryKeys;
+    if (!names.length) {
+      return {
+        stableText: "—",
+        stableValue: 100,
+        activeAlerts: 0,
+        avgDeviation: "0.0%",
+        lastAnomaly: "—",
+        mode: "Nominal",
+        statusLine: `Awaiting live telemetry for ${facility}.`,
+      };
+    }
+
+    const now = Date.now();
+    let sumDev = 0;
+    let count = 0;
+
+    names.forEach((name) => {
       const series = history[name];
       const thr = ALERT_THRESHOLDS[name];
-      const v = series?.[series.length - 1]?.y;
-      if (!thr || typeof v !== "number") return;
+      if (!thr || !series?.length) return;
+
+      const latest = series[series.length - 1];
+      if (!latest?.x || typeof latest?.y !== "number") return;
+
+      if (now - new Date(latest.x).getTime() > FRESH_WINDOW_MS) return;
+
       const mid = (thr.min + thr.max) / 2;
       const half = (thr.max - thr.min) / 2 || 1;
-      const dev = Math.min(1, Math.abs(v - mid) / half);
+      const dev = Math.min(1, Math.abs(latest.y - mid) / half);
       sumDev += dev;
       count++;
     });
-    const avgDevPct = count ? ((sumDev / count) * 100).toFixed(1) : "0.0";
-    const activeAlerts = allAlerts.filter((a) => a.sensor.startsWith(`${facility} •`)).length;
-    const stab = Math.max(0, 100 - (Number(avgDevPct) || 0) * 0.6 - activeAlerts * 4).toFixed(0);
-    const lastFacAlert = allAlerts.find((a) => a.sensor.startsWith(`${facility} •`));
-    const last = lastFacAlert?.time ? new Date(lastFacAlert.time) : null;
+
+    const avgDev = count ? sumDev / count : 0;
+    const avgDevPct = (avgDev * 100).toFixed(1);
+
+    const currentBreaches = computeBreachesNow({
+      facility,
+      history,
+      thresholds: ALERT_THRESHOLDS,
+    });
+
+    const activeAlerts = currentBreaches.length;
+    const stability = Math.max(0, Math.min(100, 100 - avgDev * 50 - activeAlerts * 10)).toFixed(0);
+
+    const last = currentBreaches[0]?.time ? new Date(currentBreaches[0].time) : null;
     const ago = last ? Math.max(1, Math.round((Date.now() - last.getTime()) / 60000)) : null;
+
+    // NEW: facility "mode" + statusLine
+    let mode = "Nominal";
+    if (activeAlerts > 0 || Number(stability) < 90) mode = "Degraded";
+    if (activeAlerts > 2 || Number(stability) < 70) mode = "Critical";
+
+    let statusLine;
+    if (mode === "Nominal") {
+      statusLine = `Nominal: all systems in ${facility} are within normal tolerances.`;
+    } else if (mode === "Degraded") {
+      statusLine = `Degraded: ${activeAlerts} active alert(s) in ${facility}; monitor closely.`;
+    } else {
+      statusLine = `Critical: multiple sensors outside range in ${facility}; investigate immediately.`;
+    }
+
     return {
-      stableText: `${stab}% stable`,
-      stableValue: Number(stab),
+      stableText: `${stability}% stable`,
+      stableValue: Number(stability),
       activeAlerts,
       avgDeviation: `${avgDevPct}%`,
       lastAnomaly: ago ? `${ago} min ago` : "—",
+      mode,
+      statusLine,
     };
-  }, [history, allAlerts, facility, facilityHistoryKeys, ALERT_THRESHOLDS]);
+  }, [history, facility, facilityHistoryKeys, ALERT_THRESHOLDS]);
 
   const ambientColor = facilityScene.ambient;
 
@@ -574,28 +817,86 @@ export default function Dashboard() {
     return { facility, latest, ts: Date.now() };
   };
 
-  const localHeuristicInsight = (snap) => {
-    const t = snap.latest["Temperature Sensor 1"];
-    const h = snap.latest["Humidity Sensor 1"];
-    const c = snap.latest["CO2 Sensor 1"];
-    const l = snap.latest["Light Sensor 1"];
-    const issues = [];
-    if (typeof t === "number" && (t < 18 || t > 28)) issues.push(`Temperature out of range (${t}°C)`);
-    if (typeof h === "number" && (h < 30 || h > 60)) issues.push(`Humidity out of range (${h}%)`);
-    if (typeof c === "number" && c > 800) issues.push(`High CO₂ (${c} ppm)`);
-    if (typeof l === "number" && (l < 100 || l > 700)) issues.push(`Light out of range (${l} lux)`);
-    const risk = Math.min(100, issues.length * 25 + ((Math.random() * 10) | 0));
-    return {
-      summary:
-        issues.length === 0
-          ? `All core metrics in ${snap.facility} look stable.`
-          : `Detected ${issues.length} issue(s): ${issues.join("; ")}.`,
-      riskScore: risk,
-      tips:
-        issues.length === 0
-          ? ["Consider running a scheduled HVAC self-check.", "Maintain current ventilation profile."]
-          : ["Investigate out-of-range metrics above.", "Adjust HVAC/lighting profiles for current occupancy."],
-    };
+  const buildSamplesFromHistory = () => {
+    const samples = [];
+    Object.entries(history)
+      .filter(([k]) => k.startsWith(`${facility} •`))
+      .forEach(([full, series]) => {
+        const base = baseNameFromFull(full);
+        const lastSlice = (series || []).slice(-100);
+        lastSlice.forEach((pt) => {
+          if (!pt?.x || typeof pt?.y !== "number") return;
+          samples.push({
+            sensor: base,
+            value: pt.y,
+            time: new Date(pt.x).toISOString(),
+          });
+        });
+      });
+    return samples;
+  };
+
+  const localHeuristicInsight = () => {
+    const now = Date.now();
+    const breaches = computeBreachesNow({ facility, history, thresholds: ALERT_THRESHOLDS });
+
+    if (!breaches.length) {
+      return {
+        summary: `All monitored metrics in ${facility} are within their normal ranges based on the latest readings.`,
+        riskScore: 5,
+        tips: [
+          "Maintain current HVAC and ventilation settings.",
+          "Schedule routine maintenance checks to keep conditions stable.",
+        ],
+      };
+    }
+
+    const lines = [];
+    let risk = 10;
+
+    breaches.forEach((b) => {
+      const series = history[b.sensor] || [];
+      const thr = ALERT_THRESHOLDS[b.sensor];
+      if (!series.length || !thr) return;
+
+      let startIdx = series.length - 1;
+      for (let i = series.length - 1; i >= 0; i--) {
+        const p = series[i];
+        if (!p?.x || typeof p?.y !== "number") continue;
+        if (!outOfRange(thr, p.y)) break;
+        startIdx = i;
+      }
+      const startPoint = series[startIdx];
+      const startTime = startPoint?.x ? new Date(startPoint.x).getTime() : now;
+      const mins = Math.max(1, Math.round((now - startTime) / 60000));
+
+      const base = baseNameFromFull(b.sensor);
+      const room = SENSOR_POS[b.sensor]?.room || "facility";
+      const dirWord = b.status === "high" ? "high" : "low";
+      const line = `${base.replace(" Sensor 1", "")} in ${room} has been ${dirWord} for about ${mins} minute${
+        mins === 1 ? "" : "s"
+      } (current ${Math.round(b.value)}, normal ${thr.min}–${thr.max}).`;
+      lines.push({ line, mins, dev: Math.abs(b.value - (thr.min + thr.max) / 2) / ((thr.max - thr.min) / 2 || 1) });
+
+      risk += 10 * lines[lines.length - 1].dev + Math.min(20, mins * 1.5);
+    });
+
+    lines.sort((a, b) => b.mins - a.mins || b.dev - a.dev);
+    const mainLines = lines.slice(0, 3).map((x) => x.line);
+
+    const summary =
+      `Currently, ${breaches.length} sensor${breaches.length === 1 ? "" : "s"} ` +
+      `in ${facility} are outside their normal ranges. ` +
+      mainLines.join(" ");
+
+    const score = Math.max(0, Math.min(100, Math.round(risk)));
+
+    const tips = [
+      "Check the listed rooms and sensors first; they show the largest deviations.",
+      "Adjust HVAC or lighting profiles as needed to bring values back into range.",
+    ];
+
+    return { summary, riskScore: score, tips };
   };
 
   const fetchWithTimeout = (url, opts = {}, ms = 6000) => {
@@ -609,24 +910,28 @@ export default function Dashboard() {
     setAiErr("");
     try {
       const snapshot = collectSnapshotForAI();
+      const samples = buildSamplesFromHistory();
+      const local = localHeuristicInsight();
+
       const res = await fetchWithTimeout("/api/ai/insights", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(snapshot),
+        body: JSON.stringify({ facility, samples, snapshot }),
       }).catch(() => null);
+
       if (res && res.ok) {
         const data = await res.json();
         setAiInsight({
-          summary: data.summary || "No summary from API.",
-          riskScore: typeof data.riskScore === "number" ? data.riskScore : 0,
-          tips: Array.isArray(data.tips) ? data.tips : [],
+          summary: data.summary || local.summary,
+          riskScore: typeof data.riskScore === "number" ? data.riskScore : local.riskScore,
+          tips: Array.isArray(data.tips) && data.tips.length ? data.tips : local.tips,
         });
       } else {
-        setAiInsight(localHeuristicInsight(snapshot));
+        setAiInsight(local);
       }
     } catch (e) {
-      setAiErr("AI service unreachable. Used local heuristic.");
-      setAiInsight(localHeuristicInsight(collectSnapshotForAI()));
+      setAiErr("AI service unreachable. Using local analysis.");
+      setAiInsight(localHeuristicInsight());
     } finally {
       setAiBusy(false);
     }
@@ -639,7 +944,7 @@ export default function Dashboard() {
       .forEach((full) => {
         const thr = ALERT_THRESHOLDS[full];
         const last = history[full]?.slice(-1)[0]?.y;
-        if (thr && typeof last === "number" && (last < thr.min || last > thr.max)) {
+        if (thr && typeof last === "number" && outOfRange(thr, last)) {
           snap.add(full);
         }
       });
@@ -661,7 +966,7 @@ export default function Dashboard() {
     ack.forEach((full) => {
       const thr = ALERT_THRESHOLDS[full];
       const last = history[full]?.slice(-1)[0]?.y;
-      if (thr && typeof last === "number" && last >= thr.min && last <= thr.max) {
+      if (thr && typeof last === "number" && inRange(thr, last)) {
         next.delete(full);
         changed = true;
       }
@@ -761,7 +1066,8 @@ export default function Dashboard() {
 
             <IntelligenceAnnouncer facility={facility} />
             <AiPanel facility={facility} history={history} analytics={analytics} />
-            <GenerateInsights facility={facility} history={history} />
+            {/* Removed duplicate GenerateInsights card to avoid conflicting messages */}
+            { <GenerateInsights facility={facility} history={history} /> }
 
             <div className="grid lg:grid-cols-2 gap-6">
               <div
@@ -790,7 +1096,7 @@ export default function Dashboard() {
                       .map(([name, pos]) => {
                         const last = (history[name] || []).slice(-1)[0]?.y;
                         const thr = ALERT_THRESHOLDS[name];
-                        const rawDanger = !!(thr && (last < thr.min || last > thr.max));
+                        const rawDanger = !!(thr && outOfRange(thr, last));
                         const danger = rawDanger && !ackSnapRef.current.has(name);
                         const [rx, rz] = roomCoord3D[pos.room] || [0, 0];
                         return (
@@ -860,7 +1166,7 @@ export default function Dashboard() {
                                 boxShadow:
                                   last &&
                                   ALERT_THRESHOLDS[sName] &&
-                                  (last < ALERT_THRESHOLDS[sName].min || last > ALERT_THRESHOLDS[sName].max)
+                                  outOfRange(ALERT_THRESHOLDS[sName], last)
                                     ? "0 0 12px rgba(239,68,68,0.6)"
                                     : `0 0 10px ${forest.glow}`,
                               }}
@@ -914,7 +1220,7 @@ export default function Dashboard() {
               {filteredSensors.map((name) => {
                 const thr = ALERT_THRESHOLDS[name];
                 const last = history[name]?.slice(-1)[0]?.y;
-                const alertActive = thr && (last < thr.min || last > thr.max);
+                const alertActive = thr && outOfRange(thr, last);
                 const zones = getZones(thr);
                 const label = baseNameFromFull(name);
                 return (
@@ -1000,7 +1306,8 @@ export default function Dashboard() {
                         style={{ background: forest.panel2, border: `1px solid ${forest.border}` }}
                       >
                         <span>
-                          ⚠️ {baseNameFromFull(a.sensor)} {SENSOR_POS[a.sensor]?.room ? `(${SENSOR_POS[a.sensor]?.room}) ` : ""}
+                          ⚠️ {baseNameFromFull(a.sensor)}{" "}
+                          {SENSOR_POS[a.sensor]?.room ? `(${SENSOR_POS[a.sensor]?.room}) ` : ""}
                           {a.status.toUpperCase()} — {a.value}
                           <span className="text-gray-400 text-xs ml-2">{new Date(a.time).toLocaleTimeString()}</span>
                         </span>
@@ -1011,13 +1318,21 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {/* ANALYTICS SIDEBAR */}
           <div className={`rounded-2xl p-4 ${ringAccent}`} style={{ background: forest.panel, border: `1px solid ${forest.border}` }}>
             <h3 className="text-lg font-semibold text-gray-200 mb-3">Analytics — {facility}</h3>
             <div className="space-y-2 text-sm">
               <Row k="System Status" v={analytics.stableText} vClass="text-green-300" />
+              <Row k="Mode" v={analytics.mode} vClass={analytics.mode === "Critical" ? "text-red-300" : "text-emerald-300"} />
               <Row k="Active Alerts" v={String(analytics.activeAlerts)} vClass="text-red-300" />
               <Row k="Avg Deviation" v={analytics.avgDeviation} vClass="text-amber-300" />
               <Row k="Last Anomaly" v={analytics.lastAnomaly} vClass="text-teal-300" />
+            </div>
+
+            {/* NEW: live techy facility summary */}
+            <div className="mt-3 text-xs text-gray-300">
+              <div className="font-semibold mb-1">Facility Pulse</div>
+              <p>{analytics.statusLine}</p>
             </div>
 
             <div className="mt-4 pt-4" style={{ borderTop: `1px solid ${forest.border}` }}>
@@ -1065,6 +1380,7 @@ export default function Dashboard() {
               </div>
             </div>
 
+            {/* Unified, live AI insights */}
             <div className="mt-6 p-4 rounded-xl" style={{ background: forest.panel2, border: `1px solid ${forest.border}` }}>
               <div className="flex items-center justify-between mb-2">
                 <h4 className="text-sm text-gray-200">AI Insights — {facility}</h4>

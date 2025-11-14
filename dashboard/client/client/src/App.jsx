@@ -2,6 +2,9 @@ import { useState } from 'react'
 import reactLogo from './assets/react.svg'
 import viteLogo from '/vite.svg'
 import './App.css'
+import Dashboard from "./Dashboard.jsx";
+import { AuthProvider } from "./AuthContext";
+import { FacilityProvider } from "./FacilityContext"
 
 function App() {
   const [count, setCount] = useState(0)
