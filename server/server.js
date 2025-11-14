@@ -87,6 +87,7 @@ app.use(
     credentials: true,
   })
 );
+
 app.use(express.json());
 
 /* basic health */
@@ -492,40 +493,17 @@ async function simulateOnce() {
 
       const status = withinAlertRange(name, candidate);
       if (status) {
-        const { rows: lastRows } = await pool.query(
-          `SELECT value, status, triggered_at
-           FROM alerts
-           WHERE sensor_name=$1
-           ORDER BY triggered_at DESC
-           LIMIT 1`,
-          [name]
+        await pool.query(
+          `INSERT INTO alerts (sensor_name, value, status, triggered_at)
+           VALUES ($1,$2,$3,NOW());`,
+          [name, candidate, status]
         );
-        let shouldInsert = true;
-        if (lastRows.length) {
-          const last = lastRows[0];
-          const lastTs = new Date(last.triggered_at).getTime();
-          const now = Date.now();
-          const sameStatus = last.status === status;
-          const k = kindFromName(name);
-          const minDelta = ALERT_MIN_DELTA[k] ?? 1;
-          const smallDelta =
-            Math.abs(Number(candidate) - Number(last.value)) < minDelta;
-          const withinCooldown = now - lastTs < ALERT_COOLDOWN_MS;
-          if (sameStatus && smallDelta && withinCooldown) shouldInsert = false;
-        }
-        if (shouldInsert) {
-          await pool.query(
-            `INSERT INTO alerts (sensor_name, value, status, triggered_at)
-             VALUES ($1,$2,$3,NOW());`,
-            [name, candidate, status]
-          );
-          io.emit("sensor-alert", {
-            sensor: name,
-            value: candidate,
-            status,
-            time: new Date(),
-          });
-        }
+        io.emit("sensor-alert", {
+          sensor: name,
+          value: candidate,
+          status,
+          time: new Date(),
+        });
       }
     } catch (e) {
       console.error("simulation error:", e);
@@ -538,10 +516,19 @@ async function boot() {
   await ensureSchema();
   await seedSensorsIfEmpty();
   await simulateOnce();
-  setInterval(simulateOnce, 5000); // always simulate every 5s
+  setInterval(simulateOnce, 5000);
 }
 boot().catch((e) => console.error("❌ Boot error:", e));
 
 /* -------------------------- Start ------------------------------ */
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+/* -------------------- Graceful shutdown ------------------------ */
+process.on("SIGTERM", async () => {
+  console.log("⛔ Shutting down...");
+  try {
+    await pool.end();
+  } catch {}
+  server.close(() => process.exit(0));
+});
