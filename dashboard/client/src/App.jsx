@@ -2,7 +2,7 @@ import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { AuthProvider, useAuth } from "./AuthContext";
 import ProtectedRoute from "./ProtectedRoute";
 import Login from "./Login";
-import Dashboard from "./dashboard";
+import Dashboard from "./Dashboard";
 import MapPage from "./MapPage";
 import Reports from "./Reports";
 import Settings from "./Settings";
