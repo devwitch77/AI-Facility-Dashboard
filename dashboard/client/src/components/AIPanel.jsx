@@ -1,7 +1,6 @@
-// src/components/AIPanel.jsx
 import { useState, useEffect } from "react";
 import { speak, cancelAll } from "../lib/tts";
-import { API_BASE } from "../lib/apiBase";
+import { API_BASE, AI_BASE } from "../lib/apiBase";
 
 
 const forest = {
@@ -12,7 +11,7 @@ const forest = {
 };
 
 async function apiPost(path, body) {
-const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${AI_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
@@ -25,6 +24,7 @@ const res = await fetch(`${API_BASE}${path}`, {
   }
   return { ok: res.ok, status: res.status, json };
 }
+
 
 
 
@@ -46,12 +46,10 @@ export default function AiPanel({ facility, analytics }) {
   const [insightsErr, setInsightsErr] = useState("");
   const [lastRetrainMsg, setLastRetrainMsg] = useState("");
 
-  // heuristic stability from dashboard analytics
   const stabilityValue = analytics?.stableValue ?? 100;
   const stabilityText = analytics?.stableText ?? `${stabilityValue}% stable`;
   const activeAlerts = analytics?.activeAlerts ?? 0;
 
-  // 🔁 refresh natural-language summary (LLM) + (optionally) speak it
   const handleRefreshSummary = async ({ silent = false } = {}) => {
     setBusySummary(true);
     setSummaryErr("");
@@ -65,7 +63,6 @@ export default function AiPanel({ facility, analytics }) {
 
       setSummary(line);
 
-      // broadcast to other components (GenerateInsights)
       window.dispatchEvent(
         new CustomEvent("ai-summary", {
           detail: { facility, summary: line },
@@ -83,7 +80,6 @@ export default function AiPanel({ facility, analytics }) {
     }
   };
 
-  // 📊 call /score to get backend model stability + top issues
   const handleScoreNow = async () => {
     setBusyScore(true);
     setScoreErr("");
@@ -96,7 +92,6 @@ export default function AiPanel({ facility, analytics }) {
       setModelStability(stab);
       setModelIssues(issues);
 
-      // broadcast to other components
       window.dispatchEvent(
         new CustomEvent("ai-score", {
           detail: {
@@ -115,7 +110,6 @@ export default function AiPanel({ facility, analytics }) {
     }
   };
 
-  // 🧠 retrain backend baselines
   const handleRetrain = async () => {
     setBusyTrain(true);
     setLastRetrainMsg("");
@@ -133,7 +127,6 @@ export default function AiPanel({ facility, analytics }) {
     }
   };
 
-  // 🧩 higher-level insights (breaches/tips) – optionally silent
   const handleInsights = async ({ silent = false } = {}) => {
     setBusyInsights(true);
     setInsightsErr("");
@@ -150,7 +143,6 @@ export default function AiPanel({ facility, analytics }) {
       setInsightsSummary(sum);
       setInsightsTips(tips);
 
-      // broadcast to other components
       window.dispatchEvent(
         new CustomEvent("ai-insights", {
           detail: {
@@ -174,9 +166,7 @@ export default function AiPanel({ facility, analytics }) {
     }
   };
 
-  // 🔁 Auto-refresh: summary + score + insights every 30s (silent)
   useEffect(() => {
-    // reset local state when facility changes
     setSummary("");
     setSummaryErr("");
     setModelStability(null);
@@ -199,8 +189,6 @@ export default function AiPanel({ facility, analytics }) {
     }, 30000);
 
     return () => clearInterval(id);
-    // we intentionally keep deps minimal so we only restart on facility change
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facility]);
 
   return (
@@ -208,16 +196,16 @@ export default function AiPanel({ facility, analytics }) {
       className="rounded-2xl p-4 space-y-4"
       style={{ background: forest.panel, border: `1px solid ${forest.border}` }}
     >
-      {/* HEADER + HEURISTIC STABILITY (your analytics) */}
+      {/* HEADER + HEURISTIC STABILITY */}
       <div className="flex items-center justify-between mb-1">
         <h3 className="text-sm text-gray-300">AI Facility Intelligence — {facility}</h3>
         <span className="text-[11px] text-gray-500">
-          {/* reserved for small status text if you want later */}
+          {/*  */}
         </span>
       </div>
 
       <div className="flex items-center gap-4">
-        {/* Stability circle from analytics */}
+        {/*  */}
         <div className="w-20 h-20 rounded-full flex items-center justify-center border-2 border-emerald-400">
           <span className="text-lg font-bold text-emerald-300">
             {stabilityValue}%
@@ -304,7 +292,7 @@ export default function AiPanel({ facility, analytics }) {
         </button>
       </div>
 
-      {/* MODEL ISSUES FROM /score */}
+      {/*  */}
       {scoreErr && (
         <div className="text-xs text-amber-300">
           {scoreErr}
