@@ -1,4 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { API_BASE } from "./lib/apiBase";
+
 
 const Ctx = createContext(null);
 
@@ -29,7 +31,7 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     try {
-      const res = await fetch(`${API_BASE}/api/login`, {
+const res = await fetch(`${API_BASE}/api/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),

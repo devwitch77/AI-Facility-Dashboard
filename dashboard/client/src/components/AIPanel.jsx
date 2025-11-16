@@ -1,6 +1,8 @@
 // src/components/AIPanel.jsx
 import { useState, useEffect } from "react";
 import { speak, cancelAll } from "../lib/tts";
+import { API_BASE } from "../lib/apiBase";
+
 
 const forest = {
   panel: "#0c100e",
@@ -10,7 +12,7 @@ const forest = {
 };
 
 async function apiPost(path, body) {
-  const res = await fetch(`${API_BASE}/api/ai${path}`, {
+const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
@@ -23,6 +25,7 @@ async function apiPost(path, body) {
   }
   return { ok: res.ok, status: res.status, json };
 }
+
 
 
 export default function AiPanel({ facility, analytics }) {

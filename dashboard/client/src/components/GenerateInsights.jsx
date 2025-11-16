@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { API_BASE } from "../lib/apiBase";
 
 const forest = {
   panel: "#0c100e",
