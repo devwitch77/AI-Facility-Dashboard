@@ -4,9 +4,6 @@ import { API_BASE } from "./lib/apiBase";
 
 const Ctx = createContext(null);
 
-// 🔹 Base URL for the API (local in dev, Railway in prod)
-const API_BASE =
-  import.meta.env.VITE_API_BASE || "http://localhost:5000";
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
@@ -29,31 +26,24 @@ export function AuthProvider({ children }) {
     else localStorage.removeItem("token");
   }, [token]);
 
-  const login = async (email, password) => {
-    try {
-const res = await fetch(`${API_BASE}/api/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
+const login = async (email, password) => {
+  try {
+    const res = await fetch(`${API_BASE}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (!data?.token) return false;
+    setToken(data.token);
+    setUser({ email: data.email, role: data.role, id: data.id || 0 });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
-      if (!res.ok) return false;
-
-      const data = await res.json();
-      if (!data?.token) return false;
-
-      setToken(data.token);
-      setUser({
-        email: data.email,
-        role: data.role,
-        id: data.id || 0,
-      });
-
-      return true;
-    } catch {
-      return false;
-    }
-  };
 
   const logout = () => {
     setUser(null);
