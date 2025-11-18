@@ -1,195 +1,200 @@
-// client/src/Reports.jsx
-import { useEffect, useMemo, useState } from "react";
-import { useTheme } from "./ThemeContext";
-import { useFacility } from "./FacilityContext";
+// dashboard/client/src/Reports.jsx
+import { useEffect, useState, useMemo } from "react";
+import { API_BASE } from "./lib/apiBase";
 
-export default function Reports() {
-  const { bundles } = useTheme();
-  const { facility: activeFacility } = useFacility();
+const forest = {
+  panel: "#0c100e",
+  panel2: "#0f1412",
+  border: "#1d2320",
+  ink: "#8FE3B3",
+};
 
-  // UI state (same look, now powered by API)
-  const [facility, setFacility] = useState(activeFacility || "Dubai");
-  const [fromISO, setFromISO] = useState(() => {
-    const d = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    return d.toISOString();
-  });
-  const [toISO, setToISO] = useState(() => new Date().toISOString());
+const REPORT_BASE = `${API_BASE.replace(/\/+$/, "")}/api/reports`;
 
+export default function Reports({ facility = "Dubai" }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
-  const [analytics, setAnalytics] = useState({
-    stableText: "—",
-    lastAnomaly: "—",
-    activeAlerts: 0,
-  });
+  const [summary, setSummary] = useState(null);
 
-  // Fetch summary when scope changes
+  // initialise a 24h range (now - 24h → now)
   useEffect(() => {
-    let ignore = false;
-    (async () => {
-      setLoading(true);
-      setErr("");
-      try {
-        const q = new URLSearchParams({
-          facility,
-          from: fromISO,
-          to: toISO,
-        }).toString();
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-        const r = await fetch(`/api/reports/summary?${q}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = await r.json();
+    const toIso = now.toISOString().slice(0, 16);       // yyyy-MM-ddTHH:mm
+    const fromIso = yesterday.toISOString().slice(0, 16);
 
-        if (!ignore) {
-          // Expecting { ok:true, analytics:{ stableText, lastAnomaly, activeAlerts }, ... }
-          const a = j?.analytics || {};
-          setAnalytics({
-            stableText: a.stableText ?? "—",
-            lastAnomaly: a.lastAnomaly ?? "—",
-            activeAlerts: typeof a.activeAlerts === "number" ? a.activeAlerts : 0,
-          });
-        }
-      } catch (e) {
-        if (!ignore) setErr("Could not load report (404 / summary).");
-      } finally {
-        if (!ignore) setLoading(false);
-      }
-    })();
-    return () => { ignore = true; };
-  }, [facility, fromISO, toISO]);
+    setTo(toIso);
+    setFrom(fromIso);
+  }, []);
 
-  // Keep your existing “summary tiles” look
-  const tiles = useMemo(
-    () => ([
-      { k: "System Status", v: analytics.stableText },
-      { k: "Last Anomaly", v: analytics.lastAnomaly },
-      { k: "Active Alerts", v: String(analytics.activeAlerts) },
-      { k: "Report Scope", v: "Custom" },
-    ]),
-    [analytics]
-  );
+  const queryString = useMemo(() => {
+    const params = new URLSearchParams();
+    if (facility) params.set("facility", facility);
+    if (from) params.set("from", new Date(from).toISOString());
+    if (to) params.set("to", new Date(to).toISOString());
+    return params.toString();
+  }, [facility, from, to]);
 
-  const exportCSV = async () => {
+  const csvUrl = `${REPORT_BASE}/export.csv?${queryString}`;
+  const pdfUrl = `${REPORT_BASE}/export.pdf?${queryString}`;
+
+  async function loadSummary(e) {
+    if (e) e.preventDefault();
+    setLoading(true);
+    setErr("");
     try {
-      const q = new URLSearchParams({ facility, from: fromISO, to: toISO }).toString();
-      const r = await fetch(`/api/reports/export.csv?${q}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${facility.toLowerCase()}-report.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      setErr("Could not export CSV.");
+      const res = await fetch(`${REPORT_BASE}/summary?${queryString}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSummary(data);
+    } catch (err) {
+      console.error("Report summary fetch error:", err);
+      setErr("Failed to load report summary from backend.");
+      setSummary(null);
+    } finally {
+      setLoading(false);
     }
-  };
+  }
 
-  const exportPDF = async () => {
-    try {
-      const q = new URLSearchParams({ facility, from: fromISO, to: toISO }).toString();
-      const r = await fetch(`/api/reports/export.pdf?${q}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${facility.toLowerCase()}-report.pdf`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      setErr("Could not export PDF.");
-    }
-  };
+  const analytics = summary?.analytics;
+  const range = summary?.range;
 
   return (
-    <div className="space-y-6">
-      {/* Scope controls (kept minimal, same page look) */}
-      <div className={`rounded-xl p-4 ${bundles.panel}`}>
-        <div className="flex flex-wrap gap-3 items-end">
-          <div>
-            <label className="text-xs opacity-80 block mb-1">Facility</label>
-            <select
-              value={facility}
-              onChange={(e) => setFacility(e.target.value)}
-              className="px-3 py-2 rounded border border-white/10 bg-black/20"
-            >
-              <option>Dubai</option>
-              <option>London</option>
-              <option>Tokyo</option>
-            </select>
-          </div>
-          <div>
-            <label className="text-xs opacity-80 block mb-1">From (ISO)</label>
-            <input
-              type="datetime-local"
-              value={toLocalDT(fromISO)}
-              onChange={(e) => setFromISO(fromLocalDT(e.target.value))}
-              className="px-3 py-2 rounded border border-white/10 bg-black/20"
-            />
-          </div>
-          <div>
-            <label className="text-xs opacity-80 block mb-1">To (ISO)</label>
-            <input
-              type="datetime-local"
-              value={toLocalDT(toISO)}
-              onChange={(e) => setToISO(fromLocalDT(e.target.value))}
-              className="px-3 py-2 rounded border border-white/10 bg-black/20"
-            />
-          </div>
-          <div className="text-sm opacity-80">
-            {loading ? "Loading…" : err ? <span className="text-amber-300">{err}</span> : " "}
-          </div>
-        </div>
+    <div
+      className="rounded-2xl p-4 space-y-4"
+      style={{ background: forest.panel, border: `1px solid ${forest.border}` }}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-sm text-gray-200">
+          Facility Reports — {facility}
+        </h2>
+        <span className="text-[11px] text-gray-500">Exports & summary</span>
       </div>
 
-      {/* Summary tiles (unchanged look) */}
-      <div id="reports-shot" className={`rounded-xl p-4 ${bundles.panel}`}>
-        <h2 className={`text-lg font-semibold mb-3`}>Summary</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {tiles.map(t => <Tile key={t.k} k={t.k} v={t.v} />)}
+      {/* Filters */}
+      <form
+        className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs"
+        onSubmit={loadSummary}
+      >
+        <div>
+          <div className="text-gray-400 mb-1">From</div>
+          <input
+            type="datetime-local"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+            className="w-full rounded-md bg-black/40 border border-gray-700 px-2 py-1 text-gray-100 text-xs"
+          />
         </div>
-      </div>
 
-      {/* Export actions (unchanged look) */}
-      <div className={`rounded-xl p-4 ${bundles.panel} flex gap-3`}>
-        <button onClick={exportCSV} className={`${bundles.btn} px-4 py-2 rounded`}>Export CSV</button>
-        <button onClick={exportPDF} className={`${bundles.btnPrimary} px-4 py-2 rounded`}>Export PDF</button>
+        <div>
+          <div className="text-gray-400 mb-1">To</div>
+          <input
+            type="datetime-local"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            className="w-full rounded-md bg-black/40 border border-gray-700 px-2 py-1 text-gray-100 text-xs"
+          />
+        </div>
+
+        <div className="flex items-end">
+          <button
+            type="submit"
+            disabled={loading}
+            className="px-3 py-2 rounded-md text-xs font-semibold"
+            style={{
+              background: forest.panel2,
+              border: `1px solid ${forest.border}`,
+              opacity: loading ? 0.6 : 1,
+            }}
+          >
+            {loading ? "Loading…" : "Refresh summary"}
+          </button>
+        </div>
+      </form>
+
+      {err && (
+        <div className="text-xs text-amber-300">
+          {err}
+        </div>
+      )}
+
+      {/* Summary panel */}
+      {summary && (
+        <div
+          className="mt-2 p-3 rounded-xl text-xs text-gray-200 space-y-2"
+          style={{
+            background: forest.panel2,
+            border: `1px solid ${forest.border}`,
+          }}
+        >
+          <div className="flex items-center justify-between">
+            <div className="font-semibold">Summary</div>
+            {range && (
+              <div className="text-[11px] text-gray-500">
+                {new Date(range.from).toLocaleString()} →{" "}
+                {new Date(range.to).toLocaleString()}
+              </div>
+            )}
+          </div>
+          {analytics ? (
+            <ul className="space-y-1">
+              <li>
+                Stability:{" "}
+                <span className="text-emerald-300 font-semibold">
+                  {analytics.stableText}
+                </span>
+              </li>
+              <li>
+                Active alerts:{" "}
+                <span className="text-red-300 font-semibold">
+                  {analytics.activeAlerts}
+                </span>
+              </li>
+              <li>
+                Last anomaly time:{" "}
+                <span className="text-sky-300">
+                  {analytics.lastAnomaly}
+                </span>
+              </li>
+            </ul>
+          ) : (
+            <p className="text-gray-400">
+              No analytics data in this window.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Export buttons */}
+      <div
+        className="mt-2 p-3 rounded-xl text-xs text-gray-200 flex flex-wrap gap-3 items-center"
+        style={{
+          background: forest.panel2,
+          border: `1px solid ${forest.border}`,
+        }}
+      >
+        <div className="font-semibold mr-2">Exports</div>
+        <a
+          href={csvUrl}
+          className="px-3 py-1 rounded border border-gray-600 bg-black/40 hover:bg-black/60"
+        >
+          Download CSV
+        </a>
+        <a
+          href={pdfUrl}
+          className="px-3 py-1 rounded border border-gray-600 bg-black/40 hover:bg-black/60"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Download PDF
+        </a>
+        <span className="text-[11px] text-gray-500 ml-auto">
+          CSV for raw data • PDF for human-readable snapshot
+        </span>
       </div>
     </div>
   );
-}
-
-function Tile({ k, v }) {
-  return (
-    <div className="rounded-lg border border-white/10 p-3">
-      <div className="text-xs opacity-80">{k}</div>
-      <div className="text-xl font-bold">{v}</div>
-    </div>
-  );
-}
-
-// ---------- helpers for datetime-local <-> ISO ----------
-function toLocalDT(iso) {
-  try {
-    const d = new Date(iso);
-    const pad = (n) => String(n).padStart(2, "0");
-    const yyyy = d.getFullYear();
-    const mm = pad(d.getMonth() + 1);
-    const dd = pad(d.getDate());
-    const hh = pad(d.getHours());
-    const mi = pad(d.getMinutes());
-    return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
-  } catch {
-    return "";
-  }
-}
-function fromLocalDT(local) {
-  try {
-    const d = new Date(local);
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
-  } catch {
-    return new Date().toISOString();
-  }
 }
